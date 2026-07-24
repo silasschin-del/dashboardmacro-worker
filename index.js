@@ -1,16 +1,22 @@
 const https = require('https')
 const { createClient } = require('@supabase/supabase-js')
 
+// ── CONFIGURAÇÃO ──────────────────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY
 const INTERVAL_MS = parseInt(process.env.INTERVAL_MS || '300000')
 const START_HOUR = parseInt(process.env.START_HOUR || '5')
 const END_HOUR = parseInt(process.env.END_HOUR || '23')
+const MIN_FACTORS = 30 // mínimo de fatores válidos para salvar
 
-if (!SUPABASE_URL || !SUPABASE_KEY) { console.error('Faltam variáveis de ambiente'); process.exit(1) }
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  console.error('ERRO: SUPABASE_URL e SUPABASE_SERVICE_KEY são obrigatórios')
+  process.exit(1)
+}
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
 
+// ── FATORES ───────────────────────────────────────────────────
 const FATORES = {
   'EURUSD=X':{p:7,dir:'neg'},'JPY=X':{p:7,dir:'pos'},'BRL=X':{p:12,dir:'pos'},
   'CNY=X':{p:6,dir:'pos'},'MXN=X':{p:5,dir:'pos'},'CHF=X':{p:4,dir:'pos'},
@@ -29,9 +35,9 @@ const FATORES = {
 const SYMBOLS = Object.keys(FATORES)
 const MAX_RASTRO = Object.values(FATORES).reduce((a, f) => a + f.p, 0)
 
+// ── HORÁRIO BRASÍLIA UTC-3 FIXO ───────────────────────────────
 function getBrTime() {
   const now = new Date()
-  // UTC-3 fixo (Brasília sem horário de verão)
   const brMs = now.getTime() - (3 * 60 * 60 * 1000)
   const br = new Date(brMs)
   const year = br.getUTCFullYear()
@@ -54,82 +60,174 @@ function shouldCollect() {
   return hour >= START_HOUR && hour <= END_HOUR
 }
 
-function fetchQuote(sym) {
+// ── COLETA COM RETRY ──────────────────────────────────────────
+function fetchOnce(sym, urlIndex) {
+  const encoded = encodeURIComponent(sym)
+  const urls = [
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encoded}?interval=1m&range=1d`,
+    `https://query2.finance.yahoo.com/v8/finance/chart/${encoded}?interval=1m&range=1d`,
+    `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encoded}`,
+  ]
+  if (urlIndex >= urls.length) return Promise.resolve(null)
+  const u = new URL(urls[urlIndex])
   return new Promise(resolve => {
-    const encoded = encodeURIComponent(sym)
-    const urls = [
-      `https://query1.finance.yahoo.com/v8/finance/chart/${encoded}?interval=1m&range=1d`,
-      `https://query2.finance.yahoo.com/v8/finance/chart/${encoded}?interval=1m&range=1d`,
-    ]
-    function tryUrl(i) {
-      if (i >= urls.length) return resolve(null)
-      const u = new URL(urls[i])
-      const req = https.get({
-        hostname: u.hostname, path: u.pathname + u.search, timeout: 8000,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Accept': 'application/json' }
-      }, res => {
-        let d = ''
-        res.on('data', c => d += c)
-        res.on('end', () => {
-          try {
-            const j = JSON.parse(d)
-            if (!j?.chart?.result?.[0]) return tryUrl(i+1)
+    const req = https.get({
+      hostname: u.hostname,
+      path: u.pathname + u.search,
+      timeout: 8000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
+      }
+    }, res => {
+      let d = ''
+      res.on('data', c => d += c)
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(d)
+          // Formato v8
+          if (j?.chart?.result?.[0]) {
             const m = j.chart.result[0].meta
             const price = m.regularMarketPrice || 0
             const prev = m.chartPreviousClose || m.previousClose || price
-            if (price === 0) return tryUrl(i+1)
-            resolve({ sym, pct: prev ? ((price-prev)/prev)*100 : 0 })
-          } catch { tryUrl(i+1) }
-        })
+            if (price > 0) {
+              const pct = prev ? ((price - prev) / prev) * 100 : 0
+              return resolve({ sym, price, pct, source: `url${urlIndex}` })
+            }
+          }
+          // Formato v7
+          if (j?.quoteResponse?.result?.[0]) {
+            const q = j.quoteResponse.result[0]
+            const price = q.regularMarketPrice || 0
+            const prev = q.regularMarketPreviousClose || price
+            if (price > 0) {
+              const pct = prev ? ((price - prev) / prev) * 100 : 0
+              return resolve({ sym, price, pct, source: `url${urlIndex}_v7` })
+            }
+          }
+          resolve(null)
+        } catch { resolve(null) }
       })
-      req.on('error', () => tryUrl(i+1))
-      req.on('timeout', () => { req.destroy(); tryUrl(i+1) })
-    }
-    tryUrl(0)
+    })
+    req.on('error', () => resolve(null))
+    req.on('timeout', () => { req.destroy(); resolve(null) })
   })
 }
 
+async function fetchQuote(sym, maxRetries = 3) {
+  for (let i = 0; i < maxRetries; i++) {
+    const result = await fetchOnce(sym, i)
+    if (result) return result
+    // Aguarda 500ms antes do próximo retry
+    if (i < maxRetries - 1) await new Promise(r => setTimeout(r, 500))
+  }
+  return null
+}
+
+// ── CÁLCULO DE SCORES ─────────────────────────────────────────
+// Threshold reduzido para 0.02% — menos fatores neutros, mais sensibilidade
+const NEUTRO_THRESHOLD = 0.02
+
 function calcScores(quotes) {
   let alta = 0, baixa = 0, neutro = 0, rastro = 0
+  const detalhes = []
+
   for (const q of quotes) {
     const def = FATORES[q.sym]
     if (!def) continue
-    if (Math.abs(q.pct) < 0.05) { neutro++; continue }
-    const up = (def.dir==='pos' && q.pct>0) || (def.dir==='neg' && q.pct<0)
-    if (up) { alta++; rastro+=def.p } else { baixa++; rastro-=def.p }
+
+    if (Math.abs(q.pct) < NEUTRO_THRESHOLD) {
+      neutro++
+      detalhes.push({ sym: q.sym, dir: 'neutro', pct: q.pct })
+      continue
+    }
+
+    const pressaoAlta = (def.dir === 'pos' && q.pct > 0) || (def.dir === 'neg' && q.pct < 0)
+    if (pressaoAlta) {
+      alta++
+      rastro += def.p
+      detalhes.push({ sym: q.sym, dir: 'alta', pct: q.pct, peso: def.p })
+    } else {
+      baixa++
+      rastro -= def.p
+      detalhes.push({ sym: q.sym, dir: 'baixa', pct: q.pct, peso: def.p })
+    }
   }
-  return { alta, baixa, neutro, rastro: Math.round((rastro/MAX_RASTRO)*100) }
+
+  const rastroNorm = Math.round((rastro / MAX_RASTRO) * 100)
+  return { alta, baixa, neutro, rastro: rastroNorm, detalhes }
 }
 
+// ── COLETA PRINCIPAL ──────────────────────────────────────────
 async function collect() {
-  const { date, time, hour, day } = getBrTime()
+  const { date, time } = getBrTime()
+
   if (!shouldCollect()) {
     console.log(`[${date} ${time} BRT] Fora do horário — aguardando`)
     return
   }
-  console.log(`\n[${date} ${time} BRT] Coletando ${SYMBOLS.length} ativos...`)
-  const results = await Promise.allSettled(SYMBOLS.map(fetchQuote))
-  const quotes = results.filter(r => r.status==='fulfilled' && r.value).map(r => r.value)
-  console.log(`  Ativos: ${quotes.length}/${SYMBOLS.length}`)
-  if (quotes.length < 3) { console.log('  Insuficiente — pulando'); return }
+
+  console.log(`\n[${date} ${time} BRT] Iniciando coleta de ${SYMBOLS.length} ativos...`)
+  const startMs = Date.now()
+
+  // Coleta todos em paralelo com retry individual
+  const results = await Promise.allSettled(SYMBOLS.map(sym => fetchQuote(sym)))
+
+  const quotes = []
+  const falhas = []
+
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled' && r.value) {
+      quotes.push(r.value)
+    } else {
+      falhas.push(SYMBOLS[i])
+    }
+  })
+
+  const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
+  console.log(`  Coletados: ${quotes.length}/${SYMBOLS.length} em ${elapsed}s`)
+
+  if (falhas.length > 0) {
+    console.log(`  Falhas (${falhas.length}): ${falhas.join(', ')}`)
+  }
+
+  // Verificar total esperado
+  if (quotes.length < MIN_FACTORS) {
+    console.log(`  ⚠ Apenas ${quotes.length} fatores — mínimo é ${MIN_FACTORS}. Coleta descartada.`)
+    return
+  }
+
   const scores = calcScores(quotes)
-  console.log(`  alta=${scores.alta} baixa=${scores.baixa} neutro=${scores.neutro} rastro=${scores.rastro}`)
+  const total = scores.alta + scores.baixa + scores.neutro
+  console.log(`  Scores: alta=${scores.alta} baixa=${scores.baixa} neutro=${scores.neutro} rastro=${scores.rastro} total=${total}`)
+
+  // Só salva se total bater com o esperado
+  if (total !== SYMBOLS.length) {
+    console.log(`  ⚠ Total ${total} != ${SYMBOLS.length} — verificar lógica`)
+  }
+
   const { error } = await supabase.from('chart_history').upsert(
     { date, time, alta: scores.alta, baixa: scores.baixa, neutro: scores.neutro, rastro: scores.rastro },
     { onConflict: 'date,time' }
   )
-  if (error) console.error('  Supabase:', error.message)
+
+  if (error) console.error(`  ✗ Supabase: ${error.message}`)
   else console.log(`  ✓ Salvo: ${date} ${time} BRT`)
 }
 
+// ── INICIALIZAÇÃO ─────────────────────────────────────────────
 async function main() {
   const { date, time } = getBrTime()
   console.log('===========================================')
-  console.log('  DashboardMacro Worker')
+  console.log('  DashboardMacro Worker v2')
   console.log(`  Horário BRT: ${date} ${time}`)
   console.log(`  Coleta: ${START_HOUR}h–${END_HOUR}h BRT`)
-  console.log(`  Intervalo: ${INTERVAL_MS/1000}s`)
+  console.log(`  Intervalo: ${INTERVAL_MS / 1000}s`)
+  console.log(`  Mínimo fatores: ${MIN_FACTORS}`)
+  console.log(`  Threshold neutro: ${NEUTRO_THRESHOLD}%`)
   console.log('===========================================')
+
   await collect()
   setInterval(collect, INTERVAL_MS)
 }
