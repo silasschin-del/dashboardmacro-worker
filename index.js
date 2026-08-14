@@ -35,7 +35,7 @@ const INTERVAL_MS = parseInt(process.env.INTERVAL_MS || '300000') // 5 minutos
 const START_HOUR = parseInt(process.env.START_HOUR || '5')
 const END_HOUR = parseInt(process.env.END_HOUR || '23')
 const MIN_FACTORS = 30        // mínimo para salvar
-const NEUTRO_THRESHOLD = 0.02 // % mínimo para não ser neutro
+const NEUTRO_THRESHOLD = 0.10 // % mínimo para não ser neutro
 const EMA_ALPHA = 0.3         // fator de suavização da EMA (0=lento, 1=rápido)
 const ACEL_WEIGHT = 0.4       // peso da aceleração no rastro_strength
 
