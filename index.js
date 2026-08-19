@@ -31,7 +31,7 @@ const { createClient } = require('@supabase/supabase-js')
 // ── CONFIGURAÇÃO ──────────────────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY
-const INTERVAL_MS = parseInt(process.env.INTERVAL_MS || '300000') // 5 minutos
+const INTERVAL_MS = parseInt(process.env.INTERVAL_MS || '60000') // 5 minutos
 const START_HOUR = parseInt(process.env.START_HOUR || '5')
 const END_HOUR = parseInt(process.env.END_HOUR || '23')
 const MIN_FACTORS = 30        // mínimo para salvar
