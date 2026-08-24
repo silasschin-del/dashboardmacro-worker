@@ -103,6 +103,8 @@ const FATORES = {
 }
 
 const SYMBOLS = Object.keys(FATORES)
+// Simbolos brasileiros — coletados separadamente para o IBOV Proxy
+const IBOV_PROXY = ['VALE3.SA', 'ITUB4.SA', 'PETR4.SA']
 const MAX_RASTRO = Object.values(FATORES).reduce((a, f) => a + f.p, 0)
 
 // Máximo teórico de strength (peso × variação máxima esperada de 5%)
@@ -306,11 +308,21 @@ async function collect() {
   }
 
   const scores = calcScores(quotes)
+    // Coleta IBOV Proxy separadamente
+  const proxyResults = await Promise.allSettled(IBOV_PROXY.map(fetchQuote))
+  const proxyQuotes = proxyResults.map((r, i) => ({
+    sym: IBOV_PROXY[i],
+    pct: r.status === 'fulfilled' && r.value ? r.value.pct : 0
+  }))
+  const vale3_pct = parseFloat((proxyQuotes[0].pct).toFixed(3))
+  const itub4_pct = parseFloat((proxyQuotes[1].pct).toFixed(3))
+  const petr4_pct = parseFloat((proxyQuotes[2].pct).toFixed(3))
+  console.log(`  IBOV Proxy: VALE3=${vale3_pct}% ITUB4=${itub4_pct}% PETR4=${petr4_pct}%`)
   console.log(`  Contagem: alta=${scores.alta} baixa=${scores.baixa} neutro=${scores.neutro} rastro=${scores.rastro}`)
   console.log(`  Strength: alta=${scores.alta_strength} baixa=${scores.baixa_strength} rastro_str=${scores.rastro_strength}`)
   console.log(`  Debug: pressao=${scores._debug.pressao_liquida} acel=${scores._debug.aceleracao} ema=${scores._debug.ema}`)
 
-  const { error } = await supabase.from('chart_history').upsert({
+ const { error } = await supabase.from('chart_history').upsert({
     date, time,
     // Campos originais
     alta: scores.alta,
@@ -321,11 +333,11 @@ async function collect() {
     alta_strength: scores.alta_strength,
     baixa_strength: scores.baixa_strength,
     rastro_strength: scores.rastro_strength,
+    // IBOV Proxy
+    vale3_pct,
+    itub4_pct,
+    petr4_pct,
   }, { onConflict: 'date,time' })
-
-  if (error) console.error(`  ✗ Supabase: ${error.message}`)
-  else console.log(`  ✓ Salvo: ${date} ${time} BRT`)
-}
 
 // ── INICIALIZAÇÃO ─────────────────────────────────────────────
 async function main() {
