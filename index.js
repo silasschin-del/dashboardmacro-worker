@@ -7,7 +7,7 @@ const INTERVAL_MS = parseInt(process.env.INTERVAL_MS || '60000')
 const START_HOUR = parseInt(process.env.START_HOUR || '5')
 const END_HOUR = parseInt(process.env.END_HOUR || '23')
 const MIN_FACTORS = 30
-const NEUTRO_THRESHOLD = 0.10
+const NEUTRO_THRESHOLD = 0.02
 const EMA_ALPHA = 0.3
 const ACEL_WEIGHT = 0.4
 
