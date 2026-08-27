@@ -61,8 +61,20 @@ const MAX_RASTRO = Object.values(FATORES).reduce((a, f) => a + f.p, 0)
 const MAX_STRENGTH_PCT = 5.0
 const MAX_STRENGTH = Object.values(FATORES).reduce((a, f) => a + f.p * MAX_STRENGTH_PCT, 0)
 
-// Simbolos brasileiros para IBOV Proxy
-const IBOV_PROXY = ['VALE3.SA', 'ITUB4.SA', 'PETR4.SA']
+// Top 10 IBOVESPA — coletados separadamente para o IBOV Proxy
+// Pesos normalizados somando 100%
+const IBOV_PROXY = [
+  { sym: 'VALE3.SA',  key: 'vale3_pct',  peso: 0.272 },
+  { sym: 'ITUB4.SA',  key: 'itub4_pct',  peso: 0.201 },
+  { sym: 'PETR4.SA',  key: 'petr4_pct',  peso: 0.182 },
+  { sym: 'PETR3.SA',  key: 'petr3_pct',  peso: 0.105 },
+  { sym: 'BBDC4.SA',  key: 'bbdc4_pct',  peso: 0.093 },
+  { sym: 'B3SA3.SA',  key: 'b3sa3_pct',  peso: 0.082 },
+  { sym: 'ABEV3.SA',  key: 'abev3_pct',  peso: 0.070 },
+  { sym: 'WEGE3.SA',  key: 'wege3_pct',  peso: 0.065 },
+  { sym: 'BBAS3.SA',  key: 'bbas3_pct',  peso: 0.058 },
+  { sym: 'ELET3.SA',  key: 'elet3_pct',  peso: 0.051 },
+]
 
 let emaRastro = null
 
@@ -184,12 +196,17 @@ async function collect() {
   console.log(`\n[${date} ${time} BRT] Coletando ${SYMBOLS.length} ativos...`)
   const t0 = Date.now()
 
-  const results = await Promise.allSettled(SYMBOLS.map(fetchQuote))
-  const quotes = results.filter(r => r.status==='fulfilled' && r.value).map(r => r.value)
-  const falhas = SYMBOLS.filter((_, i) => !(results[i].status==='fulfilled' && results[i].value))
+  // Coleta fatores macro e IBOV Proxy em paralelo
+  const [macroResults, proxyResults] = await Promise.all([
+    Promise.allSettled(SYMBOLS.map(fetchQuote)),
+    Promise.allSettled(IBOV_PROXY.map(a => fetchQuote(a.sym)))
+  ])
+
+  const quotes = macroResults.filter(r => r.status==='fulfilled' && r.value).map(r => r.value)
+  const falhas = SYMBOLS.filter((_, i) => !(macroResults[i].status==='fulfilled' && macroResults[i].value))
 
   console.log(`  Coletados: ${quotes.length}/${SYMBOLS.length} em ${((Date.now()-t0)/1000).toFixed(1)}s`)
-  if (falhas.length) console.log(`  Falhas: ${falhas.join(', ')}`)
+  if (falhas.length) console.log(`  Falhas macro: ${falhas.join(', ')}`)
 
   if (quotes.length < MIN_FACTORS) {
     console.log(`  Minimo ${MIN_FACTORS} — descartado`)
@@ -198,20 +215,19 @@ async function collect() {
 
   const scores = calcScores(quotes)
 
-  // Coleta IBOV Proxy separadamente
-  const proxyResults = await Promise.allSettled(IBOV_PROXY.map(fetchQuote))
-  const proxyQuotes = proxyResults.map((r, i) => ({
-    sym: IBOV_PROXY[i],
-    pct: r.status === 'fulfilled' && r.value ? r.value.pct : 0
-  }))
-  const vale3_pct = parseFloat((proxyQuotes[0].pct).toFixed(3))
-  const itub4_pct = parseFloat((proxyQuotes[1].pct).toFixed(3))
-  const petr4_pct = parseFloat((proxyQuotes[2].pct).toFixed(3))
-  console.log(`  IBOV Proxy: VALE3=${vale3_pct}% ITUB4=${itub4_pct}% PETR4=${petr4_pct}%`)
+  // Processa IBOV Proxy
+  const proxyData = {}
+  let indiceProxy = 0
+  IBOV_PROXY.forEach((a, i) => {
+    const r = proxyResults[i]
+    const pct = r.status === 'fulfilled' && r.value ? r.value.pct : 0
+    proxyData[a.key] = parseFloat(pct.toFixed(3))
+    indiceProxy += pct * a.peso
+  })
+  console.log(`  IBOV Proxy: indice=${indiceProxy.toFixed(2)}%`)
 
   console.log(`  Contagem: alta=${scores.alta} baixa=${scores.baixa} neutro=${scores.neutro} rastro=${scores.rastro}`)
   console.log(`  Strength: alta=${scores.alta_strength} baixa=${scores.baixa_strength} rastro_str=${scores.rastro_strength}`)
-  console.log(`  Debug: pressao=${scores._debug.pressao_liquida} acel=${scores._debug.aceleracao} ema=${scores._debug.ema}`)
 
   const { error } = await supabase.from('chart_history').upsert({
     date, time,
@@ -222,9 +238,7 @@ async function collect() {
     alta_strength: scores.alta_strength,
     baixa_strength: scores.baixa_strength,
     rastro_strength: scores.rastro_strength,
-    vale3_pct,
-    itub4_pct,
-    petr4_pct,
+    ...proxyData,
   }, { onConflict: 'date,time' })
 
   if (error) console.error(`  Supabase: ${error.message}`)
@@ -234,12 +248,12 @@ async function collect() {
 async function main() {
   const { date, time } = getBrTime()
   console.log('===========================================')
-  console.log('  DashboardMacro Worker v3')
+  console.log('  DashboardMacro Worker v4')
   console.log(`  Horario BRT: ${date} ${time}`)
   console.log(`  Coleta: ${START_HOUR}h-${END_HOUR}h BRT`)
   console.log(`  Intervalo: ${INTERVAL_MS/1000}s`)
-  console.log(`  EMA Alpha: ${EMA_ALPHA} | Acel Weight: ${ACEL_WEIGHT}`)
-  console.log(`  Neutro Threshold: ${NEUTRO_THRESHOLD}%`)
+  console.log(`  Fatores macro: ${SYMBOLS.length}`)
+  console.log(`  IBOV Proxy: ${IBOV_PROXY.length} acoes`)
   console.log('===========================================')
   await collect()
   setInterval(collect, INTERVAL_MS)
