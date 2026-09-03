@@ -74,6 +74,7 @@ const IBOV_PROXY = [
   { sym: 'WEGE3.SA',  key: 'wege3_pct',  peso: 0.065 },
   { sym: 'BBAS3.SA',  key: 'bbas3_pct',  peso: 0.058 },
   { sym: 'ELET3.SA',  key: 'elet3_pct',  peso: 0.051 },
+  { sym: 'EWZ',       key: 'ewz_pct',    peso: 0.000 },
 ]
 
 let emaRastro = null
@@ -224,7 +225,7 @@ async function collect() {
     proxyData[a.key] = parseFloat(pct.toFixed(3))
     indiceProxy += pct * a.peso
   })
-  console.log(`  IBOV Proxy: indice=${indiceProxy.toFixed(2)}%`)
+  console.log(`  IBOV Proxy: indice=${indiceProxy.toFixed(2)}%`).join(' ')}`)
 
   console.log(`  Contagem: alta=${scores.alta} baixa=${scores.baixa} neutro=${scores.neutro} rastro=${scores.rastro}`)
   console.log(`  Strength: alta=${scores.alta_strength} baixa=${scores.baixa_strength} rastro_str=${scores.rastro_strength}`)
