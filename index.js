@@ -260,9 +260,9 @@ async function main() {
   setInterval(collect, INTERVAL_MS)
 
   // PARTE 4 — Indicadores BR (IPCA) — modulo independente, nao interfere na coleta acima
-  atualizarIPCA(supabase).catch(e => console.error('Erro PARTE 4 (IPCA):', e.message))
+  atualizarTodos(supabase).catch(e => console.error('Erro PARTE 4 (IPCA):', e.message))
   setInterval(() => {
-    atualizarIPCA(supabase).catch(e => console.error('Erro PARTE 4 (IPCA):', e.message))
+    atualizarTodos(supabase).catch(e => console.error('Erro PARTE 4 (IPCA):', e.message))
   }, 15 * 60 * 1000)
 }
 
