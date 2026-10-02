@@ -1,6 +1,6 @@
 const https = require('https')
 const { createClient } = require('@supabase/supabase-js')
-const { atualizarIPCA } = require('./economicBR') // PARTE 4 — Indicadores BR
+const { atualizarTodos } = require('./economicBR') // PARTE 4 — Indicadores BR
 
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY
