@@ -47,19 +47,24 @@ const SELIC_REGRA = {
   neutro: { usd: 'neutro', ibov: 'neutro' }
 };
 
+function hojeBRT() {
+  const br = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  return `${br.getUTCFullYear()}-${String(br.getUTCMonth() + 1).padStart(2, '0')}-${String(br.getUTCDate()).padStart(2, '0')}`;
+}
+
 function mesReferencia(dataStr) {
   const partes = dataStr.split('/');
   return `${partes[1]}/${partes[2]}`;
 }
 
 function reuniaoMaisRecente() {
-  const hoje = new Date();
-  const passadas = COPOM_2026.filter(r => new Date(r.divulgacao) <= hoje);
+  const hoje = hojeBRT();
+  const passadas = COPOM_2026.filter(r => r.divulgacao <= hoje);
   return passadas.length ? passadas[passadas.length - 1] : null;
 }
 
 function classificar(regra, esperado, realizado, threshold) {
-  const diff = Math.round((realizado - esperado) * 10000) / 10000; // arredonda, evita erro de ponto flutuante
+  const diff = Math.round((realizado - esperado) * 10000) / 10000;
   let faixa = 'neutro';
   if (Math.abs(diff) >= threshold) faixa = diff > 0 ? 'acima' : 'abaixo';
   return { surpresa: diff, ...regra[faixa] };
@@ -104,6 +109,55 @@ async function salvar(supabase, indicador, referencia, esperado, realizado, surp
   else console.log(`[PARTE 4] ${indicador} ${referencia} (divulgado ${dataDivulgacao}): esperado=${esperado} realizado=${realizado} surpresa=${surpresa}`);
 }
 
+// Salva a linha "agendada" (so com expectativa) do proximo lancamento, se ainda nao saiu
+async function salvarAgendado(supabase, indicador, referencia, dataDivulgacao, expectativa) {
+  const { data: existente } = await supabase
+    .from('economic_events_br')
+    .select('valor_realizado')
+    .eq('indicador', indicador)
+    .eq('data_referencia', referencia)
+    .maybeSingle();
+
+  if (existente && existente.valor_realizado !== null) return; // ja saiu, nao mexe
+
+  const { error } = await supabase.from('economic_events_br').upsert({
+    indicador,
+    data_referencia: referencia,
+    valor_esperado: expectativa ? parseFloat(expectativa.Mediana) : null,
+    data_divulgacao: dataDivulgacao
+  }, { onConflict: 'indicador,data_referencia' });
+
+  if (error) console.error(`[PARTE 4] Erro ao agendar ${indicador}:`, error.message);
+  else console.log(`[PARTE 4] Agendado: ${indicador} ${referencia} sai em ${dataDivulgacao}`);
+}
+
+async function agendarMensal(supabase, config) {
+  try {
+    const hoje = hojeBRT();
+    const proxima = Object.entries(config.calendario)
+      .filter(([, data]) => data >= hoje)
+      .sort((a, b) => a[1].localeCompare(b[1]))[0];
+    if (!proxima) return;
+    const [referencia, dataDivulgacao] = proxima;
+    const expectativa = await buscarExpectativaMensal(config.nome, referencia);
+    await salvarAgendado(supabase, config.nome, referencia, dataDivulgacao, expectativa);
+  } catch (e) {
+    console.error(`[PARTE 4] Erro ao agendar ${config.nome}:`, e.message);
+  }
+}
+
+async function agendarSelic(supabase) {
+  try {
+    const hoje = hojeBRT();
+    const proxima = COPOM_2026.find(r => r.divulgacao >= hoje);
+    if (!proxima) return;
+    const expectativa = await buscarExpectativaSelic(proxima.reuniao);
+    await salvarAgendado(supabase, 'Selic', proxima.reuniao, proxima.divulgacao, expectativa);
+  } catch (e) {
+    console.error('[PARTE 4] Erro ao agendar Selic:', e.message);
+  }
+}
+
 async function atualizarIndicadorMensal(supabase, config) {
   try {
     const realizado = await buscarSGS(config.sgsCodigo);
@@ -144,6 +198,12 @@ async function atualizarSelic(supabase) {
 }
 
 async function atualizarTodos(supabase) {
+  // 1) garante a linha "aguardando" do proximo lancamento de cada indicador
+  for (const config of INDICADORES_MENSAIS) {
+    await agendarMensal(supabase, config);
+  }
+  await agendarSelic(supabase);
+  // 2) preenche com o valor realizado quando ele ja saiu
   for (const config of INDICADORES_MENSAIS) {
     await atualizarIndicadorMensal(supabase, config);
   }
