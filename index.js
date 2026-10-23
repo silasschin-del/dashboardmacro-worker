@@ -1,6 +1,5 @@
 const https = require('https')
 const { createClient } = require('@supabase/supabase-js')
-const { atualizarTodos } = require('./economicBR') // PARTE 4 — Indicadores BR
 
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY
@@ -258,12 +257,6 @@ async function main() {
   console.log('===========================================')
   await collect()
   setInterval(collect, INTERVAL_MS)
-
-  // PARTE 4 — Indicadores BR (IPCA) — modulo independente, nao interfere na coleta acima
-  atualizarTodos(supabase).catch(e => console.error('Erro PARTE 4 (IPCA):', e.message))
-  setInterval(() => {
-    atualizarTodos(supabase).catch(e => console.error('Erro PARTE 4 (IPCA):', e.message))
-  }, 15 * 60 * 1000)
 }
 
 main().catch(e => { console.error('Fatal:', e); process.exit(1) })
