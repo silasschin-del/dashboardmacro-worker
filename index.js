@@ -1,5 +1,6 @@
 const https = require('https')
 const { createClient } = require('@supabase/supabase-js')
+const { saveSnapshot } = require('./factorSnapshots')
 
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY
@@ -77,6 +78,7 @@ const IBOV_PROXY = [
 ]
 
 let emaRastro = null
+const failReasons = new Map() // ticker -> motivo da ultima falha (so para o painel de monitoramento)
 
 function getBrTime() {
   const now = new Date()
@@ -120,20 +122,27 @@ function fetchOnce(sym, urlIndex) {
             const m = j.chart.result[0].meta
             const price = m.regularMarketPrice || 0
             const prev = m.chartPreviousClose || m.previousClose || price
-            if (price > 0) return resolve({ sym, pct: prev ? ((price-prev)/prev)*100 : 0 })
+            if (price > 0) {
+              const cl = j.chart.result[0].indicators?.quote?.[0]?.close || []
+              const ts = j.chart.result[0].timestamp || []
+              let lc = null
+              for (let k = cl.length - 1; k >= 0; k--) { if (cl[k] != null) { lc = ts[k] ?? null; break } }
+              return resolve({ sym, pct: prev ? ((price-prev)/prev)*100 : 0, price, qt: m.regularMarketTime ?? null, lc })
+            }
           }
           if (j?.quoteResponse?.result?.[0]) {
             const q = j.quoteResponse.result[0]
             const price = q.regularMarketPrice || 0
             const prev = q.regularMarketPreviousClose || price
-            if (price > 0) return resolve({ sym, pct: prev ? ((price-prev)/prev)*100 : 0 })
+            if (price > 0) return resolve({ sym, pct: prev ? ((price-prev)/prev)*100 : 0, price, qt: q.regularMarketTime ?? null, lc: null })
           }
+          failReasons.set(sym, 'resposta_sem_preco')
           resolve(null)
-        } catch { resolve(null) }
+        } catch { failReasons.set(sym, 'resposta_invalida'); resolve(null) }
       })
     })
-    req.on('error', () => resolve(null))
-    req.on('timeout', () => { req.destroy(); resolve(null) })
+    req.on('error', () => { failReasons.set(sym, 'erro_de_rede'); resolve(null) })
+    req.on('timeout', () => { failReasons.set(sym, 'timeout'); req.destroy(); resolve(null) })
   })
 }
 
@@ -207,6 +216,10 @@ async function collect() {
 
   console.log(`  Coletados: ${quotes.length}/${SYMBOLS.length} em ${((Date.now()-t0)/1000).toFixed(1)}s`)
   if (falhas.length) console.log(`  Falhas macro: ${falhas.join(', ')}`)
+
+  // Registro para o painel de fatores (nao bloqueia e nunca afeta o calculo abaixo)
+  saveSnapshot(supabase, { date, time, intervalMs: INTERVAL_MS, symbols: SYMBOLS, fatores: FATORES,
+    results: macroResults, failReasons, minFactors: MIN_FACTORS }).catch(() => {})
 
   if (quotes.length < MIN_FACTORS) {
     console.log(`  Minimo ${MIN_FACTORS} — descartado`)
