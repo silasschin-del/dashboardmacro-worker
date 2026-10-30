@@ -4,6 +4,19 @@
 
 const RETENTION_DAYS = 7
 let lastCleanupDate = null
+let roleLogged = false
+
+// Diagnostico: mostra SO o papel da chave (anon / service_role), nunca a chave em si.
+function keyRole() {
+  const k = process.env.SUPABASE_SERVICE_KEY || ''
+  try {
+    if (k.startsWith('eyJ')) {
+      const p = JSON.parse(Buffer.from(k.split('.')[1], 'base64').toString())
+      return 'role=' + p.role
+    }
+  } catch (e) {}
+  return 'formato=' + k.slice(0, 6)
+}
 
 // results: array alinhado com symbols; cada item e o objeto de fetchQuote ou null
 // failReasons: Map ticker -> motivo da ultima falha
@@ -40,7 +53,10 @@ async function saveSnapshot(supabase, ctx) {
       discarded: ok < minFactors,
       data,
     }, { onConflict: 'date,time' })
-    if (error) console.error(`  Snapshot: ${error.message}`)
+    if (error) {
+      console.error(`  Snapshot: ${error.message}`)
+      if (!roleLogged) { roleLogged = true; console.error(`  Papel da chave do worker: ${keyRole()}`) }
+    }
     await cleanupOld(supabase, date)
   } catch (e) {
     console.error(`  Snapshot (ignorado): ${e && e.message}`)
