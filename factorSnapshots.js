@@ -1,27 +1,64 @@
--- DashboardMacro: tabela NOVA para o painel de fatores e monitor de atualidade.
--- NAO altera chart_history. Rode no Supabase > SQL Editor.
+// Registro por ciclo dos 39 fatores, para o painel de fatores e o monitor de atualidade.
+// REGRA: este modulo NUNCA lanca erro para fora e NUNCA e usado no calculo de scores.
+// Se falhar, so escreve um aviso no log. chart_history nao depende dele.
 
-create table if not exists public.factor_snapshots (
-  date          text        not null,            -- data BRT (YYYY-MM-DD), igual ao chart_history
-  time          text        not null,            -- hora BRT (HH:MM), igual ao chart_history
-  collected_at  timestamptz not null,            -- relogio do servidor do worker (UTC)
-  interval_ms   integer     not null,            -- frequencia configurada do worker
-  ok_count      integer     not null,            -- fatores com cotacao valida neste ciclo
-  total_count   integer     not null,            -- fatores pedidos neste ciclo
-  discarded     boolean     not null default false, -- true = ciclo descartado (< minimo de fatores)
-  data          jsonb       not null,            -- {ticker: {p,c,t,lc,ok,r,w,d}}
-  primary key (date, time)
-);
+const RETENTION_DAYS = 7
+let lastCleanupDate = null
 
-create index if not exists factor_snapshots_collected_at_idx
-  on public.factor_snapshots (collected_at desc);
+// results: array alinhado com symbols; cada item e o objeto de fetchQuote ou null
+// failReasons: Map ticker -> motivo da ultima falha
+async function saveSnapshot(supabase, ctx) {
+  try {
+    const { date, time, intervalMs, symbols, fatores, results, failReasons, minFactors } = ctx
+    const data = {}
+    let ok = 0
+    symbols.forEach((sym, i) => {
+      const r = results[i]
+      const good = r.status === 'fulfilled' && r.value
+      const def = fatores[sym]
+      if (good) {
+        ok++
+        const v = r.value
+        data[sym] = {
+          p: v.price,            // preco usado
+          c: round(v.pct, 4),    // variacao % usada no calculo
+          t: v.qt ?? null,       // regularMarketTime da cotacao (epoch s) ou null se Yahoo nao informou
+          lc: v.lc ?? null,      // horario do ultimo candle 1m com preco (epoch s) ou null
+          ok: true, w: def.p, d: def.dir,
+        }
+      } else {
+        data[sym] = { p: null, c: null, t: null, lc: null, ok: false,
+          r: failReasons.get(sym) || 'sem_resposta', w: def.p, d: def.dir }
+      }
+    })
+    const { error } = await supabase.from('factor_snapshots').upsert({
+      date, time,
+      collected_at: new Date().toISOString(),
+      interval_ms: intervalMs,
+      ok_count: ok,
+      total_count: symbols.length,
+      discarded: ok < minFactors,
+      data,
+    }, { onConflict: 'date,time' })
+    if (error) console.error(`  Snapshot: ${error.message}`)
+    await cleanupOld(supabase, date)
+  } catch (e) {
+    console.error(`  Snapshot (ignorado): ${e && e.message}`)
+  }
+}
 
--- Navegador (anon/authenticated): SOMENTE LEITURA. O worker usa a service key (ignora RLS) para gravar.
-alter table public.factor_snapshots enable row level security;
+async function cleanupOld(supabase, date) {
+  if (lastCleanupDate === date) return
+  lastCleanupDate = date
+  try {
+    const limite = new Date(Date.now() - RETENTION_DAYS * 86400000).toISOString()
+    const { error } = await supabase.from('factor_snapshots').delete().lt('collected_at', limite)
+    if (error) console.error(`  Limpeza snapshots: ${error.message}`)
+  } catch (e) {
+    console.error(`  Limpeza snapshots (ignorada): ${e && e.message}`)
+  }
+}
 
-drop policy if exists "factor_snapshots_select" on public.factor_snapshots;
-create policy "factor_snapshots_select" on public.factor_snapshots
-  for select to anon, authenticated using (true);
+function round(n, d) { return Number.isFinite(n) ? parseFloat(n.toFixed(d)) : null }
 
-revoke insert, update, delete on public.factor_snapshots from anon, authenticated;
-grant select on public.factor_snapshots to anon, authenticated;
+module.exports = { saveSnapshot, RETENTION_DAYS }
